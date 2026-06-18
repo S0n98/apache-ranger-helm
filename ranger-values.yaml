@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: apache/ranger
-  tag: "2.7.0"
+  tag: "2.8.0"
   pullPolicy: IfNotPresent
 
 ranger:
@@ -22,10 +22,17 @@ resources:
     memory: 512Mi
 
 ingress:
-  enabled: false
-  className: ""
-  annotations: {}
-  hosts: []
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  hosts:
+    - host: ranger.local
+      paths:
+        - path: /
+          pathType: Prefix
   tls: []
 
 postgresql:
@@ -40,6 +47,25 @@ postgresql:
     password: rangerpass
     database: rangerdb
   primary:
+    # Protect the (potentially slow, e.g. NFS-backed) DB initialization window.
+    # Without this, the default livenessProbe kills the container ~90-120s after
+    # start; on slow storage this happens mid-init, before the postgres/ranger
+    # passwords are assigned. The half-written volume then permanently skips
+    # credential setup on restart, causing "password authentication failed for
+    # user postgres / User postgres has no password assigned".
+    # The startupProbe gates liveness/readiness until init completes.
+    startupProbe:
+      enabled: true
+      initialDelaySeconds: 30
+      periodSeconds: 15
+      timeoutSeconds: 5
+      failureThreshold: 40 # ~30s + 40*15s ≈ 10 min budget for first-time init
+    livenessProbe:
+      enabled: true
+      initialDelaySeconds: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
     service:
       type: ClusterIP # or LoadBalancer, NodePort
       port: 5432

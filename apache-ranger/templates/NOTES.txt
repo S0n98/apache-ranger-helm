@@ -1,0 +1,26 @@
+Apache Ranger ({{ .Chart.AppVersion }}) has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+NOTE: First-time startup takes several minutes. PostgreSQL initializes, then Ranger
+loads its DB schema before the admin UI becomes available. Watch progress with:
+
+  kubectl get pods -n {{ .Release.Namespace }} -w
+  kubectl logs -n {{ .Release.Namespace }} -l app={{ .Chart.Name }} -f
+
+Admin credentials:
+  username: admin
+  password: {{ .Values.ranger.adminPassword }}
+
+Access the Ranger Admin UI:
+{{- if .Values.ingress.enabled }}
+  Ingress is enabled. Add the host(s) below to your DNS / /etc/hosts pointing at
+  your ingress controller's address, then browse to:
+{{- range .Values.ingress.hosts }}
+    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+  Ingress is disabled. Port-forward the service instead:
+
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ .Release.Name }}-{{ .Chart.Name }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+  then browse to http://localhost:{{ .Values.service.port }}/
+{{- end }}

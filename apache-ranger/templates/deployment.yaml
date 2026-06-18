@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-{{ .Chart.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods automatically whenever install.properties (the ConfigMap)
+        # changes, so config fixes take effect without a manual rollout restart.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app: {{ .Chart.Name }}
+    spec:
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      initContainers:
+        - name: init-config
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /tmp/ranger-config/install.properties /mnt/config/install.properties
+              cp /opt/ranger/admin/setup.sh /mnt/config/setup.sh
+              sed -i 's/chown -R.*INSTALL_DIR.*/true/g' /mnt/config/setup.sh
+          volumeMounts:
+            - name: ranger-config
+              mountPath: /tmp/ranger-config/install.properties
+              subPath: install.properties
+            - name: config-volume
+              mountPath: /mnt/config
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for PostgreSQL to be fully ready..."
+              until /opt/java/openjdk/bin/java -cp /usr/share/java/postgresql.jar:/opt/ranger/ranger-{{ .Values.image.tag }}-admin/jisql/lib/* org.apache.util.sql.Jisql -driver postgresql -cstring "jdbc:postgresql://{{ .Release.Name }}-postgresql:{{ .Values.postgresql.primary.service.port }}/postgres" -u postgres -p '{{ .Values.postgresql.auth.postgresPassword }}' -noheader -trim -c \; -query "SELECT 1;" 2>/dev/null | grep -q "^1"; do
+                echo "PostgreSQL not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "PostgreSQL is ready! Running Ranger Admin setup..."
+              cd /opt/ranger/admin
+              # NOTE: we intentionally do NOT run /home/ranger/scripts/ranger.sh here.
+              # That image entrypoint overwrites /opt/ranger/admin/install.properties with
+              # the image default (db_host=ranger-db, db_name=ranger) and relies on env vars
+              # (RANGER_DB_USER/RANGER_DB_PASSWORD/POSTGRES_PASSWORD) that this chart does not
+              # set, which breaks the DB connection ("connection attempt failed" to ranger-db
+              # with an empty user). Instead we drive setup.sh directly using the correct
+              # install.properties that this chart mounts (db_host={{ .Release.Name }}-postgresql,
+              # db_name={{ .Values.postgresql.auth.database }}).
+              if [ ! -e /opt/ranger/.setupDone ]; then
+                ./setup.sh && touch /opt/ranger/.setupDone
+              fi
+              ./ews/ranger-admin-services.sh start
+              echo "Waiting for Ranger Admin to come up..."
+              sleep 30
+              python3 /home/ranger/scripts/create-ranger-services.py || true
+              RANGER_ADMIN_PID=$(ps -ef | grep -v grep | grep -i "org.apache.ranger.server.tomcat.EmbeddedServer" | awk '{print $2}')
+              if [ -z "$RANGER_ADMIN_PID" ]; then
+                echo "Ranger Admin process probably exited, no process id found!"
+                exit 1
+              fi
+              # keep the container alive for as long as the admin process runs
+              tail --pid=$RANGER_ADMIN_PID -f /dev/null
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /opt/ranger/admin/install.properties
+              subPath: install.properties
+            - name: config-volume
+              mountPath: /opt/ranger/admin/setup.sh
+              subPath: setup.sh
+      volumes:
+        - name: ranger-config
+          configMap:
+            name: {{ .Release.Name }}-{{ .Chart.Name }}-config
+        - name: config-volume
+          emptyDir: {}

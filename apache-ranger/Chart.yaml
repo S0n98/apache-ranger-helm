@@ -1,0 +1,14 @@
+apiVersion: v2
+appVersion: 2.8.0
+dependencies:
+- condition: postgresql.enabled
+  name: postgresql
+  repository: https://charts.bitnami.com/bitnami
+  version: 13.2.27
+description: A Helm chart for Apache Ranger
+name: apache-ranger
+type: application
+version: 0.2.0
+maintainers:
+- name: danghs198
+  email: danghs198@gmail.com
