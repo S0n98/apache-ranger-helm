@@ -1,5 +1,11 @@
 replicaCount: 1
 
+hostAliases: []
+# - ip: "127.0.0.1"
+#   hostnames:
+#     - "foo.local"
+#     - "bar.local"
+
 image:
   repository: apache/ranger
   tag: "2.8.0"
@@ -20,6 +26,12 @@ resources:
   requests:
     cpu: 250m
     memory: 512Mi
+
+customCaCerts:
+  enabled: false
+  # Name of a Secret whose keys are PEM certificate files (e.g. trino-ca.crt).
+  # All certs are imported into the JVM truststore so Ranger can connect over TLS.
+  secretName: ""
 
 ingress:
   enabled: false

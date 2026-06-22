@@ -1,0 +1,7 @@
+# Packaged Helm charts
+*.tgz
+
+# TLS certificates and private keys
+*.crt
+*.key
+*.pem

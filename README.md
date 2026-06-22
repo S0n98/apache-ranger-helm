@@ -4,7 +4,7 @@ A Helm chart that deploys [Apache Ranger](https://ranger.apache.org/) Admin (v2.
 with a bundled [Bitnami PostgreSQL](https://github.com/bitnami/charts/tree/main/bitnami/postgresql)
 database as its policy store.
 
-- **Chart version:** `0.2.0`
+- **Chart version:** `0.5.0`
 - **App version (Ranger):** `2.8.0`
 - **Database:** PostgreSQL 14 (bundled subchart, `postgresql` v13.2.27)
 
@@ -15,7 +15,7 @@ database as its policy store.
 ```
 .
 ├── apache-ranger/                 # Chart source
-│   ├── Chart.yaml                 # version 0.2.0 / appVersion 2.8.0
+│   ├── Chart.yaml                 # version 0.5.0 / appVersion 2.8.0
 │   ├── values.yaml                # default values (ingress disabled by default)
 │   ├── charts/postgresql/         # bundled Bitnami PostgreSQL subchart
 │   └── templates/
@@ -24,8 +24,9 @@ database as its policy store.
 │       ├── service.yaml           # ClusterIP service on :6080
 │       ├── ingress.yaml           # optional Ingress
 │       └── NOTES.txt              # post-install access instructions
-├── apache-ranger-0.2.0.tgz        # packaged chart (this version)
-├── apache-ranger-0.1.1.tgz        # previous packaged chart
+├── apache-ranger-0.4.0.tgz        # previous packaged chart (customCaCerts)
+├── apache-ranger-0.3.0.tgz        # previous packaged chart (hostAliases)
+├── apache-ranger-0.2.0.tgz        # previous packaged chart
 └── ranger-values.yaml             # example/override values (ingress enabled, ranger.local)
 ```
 
@@ -99,25 +100,170 @@ kubectl port-forward -n ranger svc/ranger-apache-ranger 6080:6080
 
 ---
 
-## Configuration
+## Values reference
 
-| Key | Default | Description |
-| --- | --- | --- |
-| `replicaCount` | `1` | Ranger Admin replicas |
-| `image.repository` / `image.tag` | `apache/ranger` / `2.8.0` | Ranger Admin image |
-| `ranger.adminPassword` | `StrongPass58` | Password for `admin`, `keyadmin`, tagsync, usersync |
-| `service.type` / `service.port` | `ClusterIP` / `6080` | Ranger Admin service |
-| `ingress.enabled` | `false` (chart) / `true` (`ranger-values.yaml`) | Create an Ingress |
-| `ingress.className` | `nginx` | IngressClass name |
-| `ingress.hosts` | `ranger.local` | Ingress hosts/paths |
-| `resources` | 250m–500m CPU / 512Mi–1Gi | Ranger Admin resources |
-| `postgresql.enabled` | `true` | Deploy the bundled PostgreSQL |
-| `postgresql.image.repository` | `bitnamilegacy/postgresql` | DB image (see note below) |
-| `postgresql.auth.postgresPassword` | `postgrespass` | `postgres` superuser password (used by Ranger as DB root) |
-| `postgresql.auth.username` / `password` | `ranger` / `rangerpass` | Ranger application DB user |
-| `postgresql.auth.database` | `rangerdb` | Ranger database name |
-| `postgresql.primary.startupProbe` | enabled, ~10 min budget | Protects slow first-time DB init (see fixes) |
-| `postgresql.primary.persistence.size` | `8Gi` | DB volume size |
+All configurable values for this chart. Override them with `-f ranger-values.yaml` or
+`--set key=value`.
+
+### General
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `replicaCount` | int | `1` | Number of Ranger Admin pod replicas |
+
+### Image
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `image.repository` | string | `apache/ranger` | Ranger Admin container image |
+| `image.tag` | string | `"2.8.0"` | Image tag |
+| `image.pullPolicy` | string | `IfNotPresent` | Kubernetes image pull policy (`Always`, `IfNotPresent`, `Never`) |
+
+### Ranger
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `ranger.adminPassword` | string | `"StrongPass58"` | Shared password for the `admin`, `keyadmin`, `rangerTagsync`, and `rangerUsersync` users |
+
+### Host aliases
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `hostAliases` | list | `[]` | Pod-level `/etc/hosts` entries. Each item has `ip` (string) and `hostnames` (list of strings) |
+
+Add custom entries to the pod's `/etc/hosts` — useful when Ranger needs to reach
+services by hostname that are not resolvable via cluster DNS:
+
+```yaml
+hostAliases:
+  - ip: "10.0.0.50"
+    hostnames:
+      - "trino.internal"
+  - ip: "10.0.0.51"
+    hostnames:
+      - "hive-metastore.internal"
+```
+
+### Custom CA certificates (TLS trust)
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `customCaCerts.enabled` | bool | `false` | Mount a Secret of CA certificates and import them into the JVM truststore at startup |
+| `customCaCerts.secretName` | string | `""` | Name of a Kubernetes Secret whose data keys are PEM (`.crt` / `.pem`) certificate files |
+
+If Ranger connects to services over TLS with certificates signed by a private CA
+(e.g. Trino, Hive, Solr), the JVM will reject the connection with a
+`PKIX path building failed` error. To fix this, provide the CA certificate(s) in a
+Kubernetes Secret and enable `customCaCerts`:
+
+```bash
+# 1. Extract the CA certificate (example: self-signed Trino behind ingress)
+openssl s_client -connect trino.local:443 -showcerts </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > trino-ca.crt
+
+# 2. Create a Kubernetes secret with the CA cert(s)
+kubectl create secret generic trino-ca-cert \
+  --from-file=trino-ca.crt=trino-ca.crt \
+  -n ranger
+```
+
+```yaml
+# 3. Enable in values
+customCaCerts:
+  enabled: true
+  secretName: "trino-ca-cert"
+```
+
+At container startup, every `.crt` / `.pem` file in the secret is imported into the
+JVM's `cacerts` truststore via `keytool` before Ranger starts. You can include
+multiple certificate files in a single Secret to trust several CAs.
+
+### Service
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `service.type` | string | `ClusterIP` | Kubernetes Service type (`ClusterIP`, `NodePort`, `LoadBalancer`) |
+| `service.port` | int | `6080` | Ranger Admin HTTP port |
+| `service.externalIPs` | list | `[]` | List of external IPs to assign to the service |
+
+### Ingress
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `ingress.enabled` | bool | `false` | Create an Ingress resource |
+| `ingress.className` | string | `"nginx"` | IngressClass name |
+| `ingress.annotations` | object | *(see below)* | Ingress annotations |
+| `ingress.hosts` | list | *(see below)* | List of hosts, each with `host` and `paths` (list of `{path, pathType}`) |
+| `ingress.tls` | list | `[]` | TLS configuration (list of `{secretName, hosts}`) |
+
+Default annotations:
+
+```yaml
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+```
+
+Default hosts:
+
+```yaml
+ingress:
+  hosts:
+    - host: ranger.local
+      paths:
+        - path: /
+          pathType: Prefix
+```
+
+### Resources
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `resources.requests.cpu` | string | `250m` | CPU request for Ranger Admin |
+| `resources.requests.memory` | string | `512Mi` | Memory request for Ranger Admin |
+| `resources.limits.cpu` | string | `500m` | CPU limit for Ranger Admin |
+| `resources.limits.memory` | string | `1024Mi` | Memory limit for Ranger Admin |
+
+### PostgreSQL (bundled subchart)
+
+This chart bundles [Bitnami PostgreSQL](https://github.com/bitnami/charts/tree/main/bitnami/postgresql)
+v13.2.27 as a dependency. The values below are the subset used by this chart; see the
+[upstream values](https://artifacthub.io/packages/helm/bitnami/postgresql/13.2.27) for
+the full reference.
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `postgresql.enabled` | bool | `true` | Deploy the bundled PostgreSQL instance |
+| `postgresql.image.registry` | string | `docker.io` | PostgreSQL image registry |
+| `postgresql.image.repository` | string | `bitnamilegacy/postgresql` | PostgreSQL image (see [image note](#image-note)) |
+| `postgresql.image.tag` | string | `14.17.0-debian-12-r3` | PostgreSQL image tag |
+| `postgresql.auth.postgresPassword` | string | `postgrespass` | `postgres` superuser password (used by Ranger as `db_root_password`) |
+| `postgresql.auth.username` | string | `ranger` | Ranger application DB user |
+| `postgresql.auth.password` | string | `rangerpass` | Ranger application DB password |
+| `postgresql.auth.database` | string | `rangerdb` | Ranger database name |
+| `postgresql.primary.startupProbe.enabled` | bool | `true` | Enable startup probe to protect slow first-time init |
+| `postgresql.primary.startupProbe.initialDelaySeconds` | int | `30` | Seconds before the first startup probe |
+| `postgresql.primary.startupProbe.periodSeconds` | int | `15` | Seconds between startup probes |
+| `postgresql.primary.startupProbe.timeoutSeconds` | int | `5` | Seconds before a probe times out |
+| `postgresql.primary.startupProbe.failureThreshold` | int | `40` | Failures allowed before giving up (~10 min budget) |
+| `postgresql.primary.livenessProbe.enabled` | bool | `true` | Enable liveness probe |
+| `postgresql.primary.livenessProbe.initialDelaySeconds` | int | `60` | Seconds before the first liveness probe |
+| `postgresql.primary.livenessProbe.periodSeconds` | int | `10` | Seconds between liveness probes |
+| `postgresql.primary.livenessProbe.timeoutSeconds` | int | `5` | Seconds before a probe times out |
+| `postgresql.primary.livenessProbe.failureThreshold` | int | `6` | Failures allowed before restarting |
+| `postgresql.primary.service.type` | string | `ClusterIP` | PostgreSQL Service type |
+| `postgresql.primary.service.port` | int | `5432` | PostgreSQL Service port |
+| `postgresql.primary.service.externalIPs` | list | `[]` | External IPs for the PostgreSQL service |
+| `postgresql.primary.resources.requests.cpu` | string | `250m` | CPU request for PostgreSQL |
+| `postgresql.primary.resources.requests.memory` | string | `512Mi` | Memory request for PostgreSQL |
+| `postgresql.primary.resources.limits.cpu` | string | `500m` | CPU limit for PostgreSQL |
+| `postgresql.primary.resources.limits.memory` | string | `1024Mi` | Memory limit for PostgreSQL |
+| `postgresql.primary.persistence.enabled` | bool | `true` | Enable persistent storage for PostgreSQL |
+| `postgresql.primary.persistence.storageClass` | string | `""` | Storage class (empty = cluster default) |
+| `postgresql.primary.persistence.size` | string | `8Gi` | PVC size |
+| `postgresql.primary.persistence.accessModes` | list | `["ReadWriteOnce"]` | PVC access modes |
 
 ### Database wiring
 
@@ -153,9 +299,108 @@ deployment. The reasons are documented inline in `templates/deployment.yaml`:
 
 ---
 
-## Troubleshooting / fixes baked into 0.2.0
+## Troubleshooting / fixes
 
-This version fixes three stacked failures seen on a fresh install (notably on slow,
+### Fixes in 0.5.0
+
+#### `keytool: command not found` — custom CA certs not imported
+**Cause:** The `keytool` binary is not in `$PATH` inside the `apache/ranger` image; it
+lives at `/opt/java/openjdk/bin/keytool`.
+
+**Fix:** The cert-import script now discovers `keytool` via `find` (same approach already
+used for `cacerts`) and invokes it by absolute path. Errors are no longer suppressed so
+import failures are visible in pod logs.
+
+#### `SSLPeerUnverifiedException: Hostname trino.local not verified` — ingress serving wrong certificate
+**Cause:** The Trino ingress references a TLS secret (`trino-tls`) that does not exist.
+When the secret is missing, NGINX falls back to its built-in **Fake Certificate**
+(`CN=Kubernetes Ingress Controller Fake Certificate`, SAN=`ingress.local`). Java's
+hostname verifier rejects the connection because `trino.local` is not in the certificate's
+Subject Alternative Names.
+
+**Fix (step-by-step):**
+
+1. Generate a self-signed TLS certificate with `trino.local` in the SAN:
+
+   ```bash
+   openssl req -x509 -nodes -days 365 \
+     -newkey rsa:2048 \
+     -keyout trino-tls.key \
+     -out trino-tls.crt \
+     -subj "/CN=trino.local/O=Trino" \
+     -addext "subjectAltName=DNS:trino.local"
+   ```
+
+2. Create the TLS secret in the Trino namespace so the ingress picks it up:
+
+   ```bash
+   kubectl -n <trino-namespace> create secret tls trino-tls \
+     --cert=trino-tls.crt \
+     --key=trino-tls.key
+   ```
+
+3. Verify the ingress is now serving the correct certificate:
+
+   ```bash
+   openssl s_client -connect trino.local:443 -servername trino.local </dev/null 2>/dev/null \
+     | openssl x509 -noout -subject -ext subjectAltName
+   # Expected: subject=CN = trino.local, O = Trino
+   #           X509v3 Subject Alternative Name: DNS:trino.local
+   ```
+
+4. Update Ranger's CA trust secret with the new certificate:
+
+   ```bash
+   # Extract the cert the ingress is now serving
+   openssl s_client -connect trino.local:443 -showcerts </dev/null 2>/dev/null \
+     | openssl x509 -outform PEM > trino-ca.crt
+
+   # Recreate the CA secret in the Ranger namespace
+   kubectl -n ranger delete secret trino-ca-cert --ignore-not-found
+   kubectl -n ranger create secret generic trino-ca-cert \
+     --from-file=trino-ca.crt=trino-ca.crt
+   ```
+
+5. Restart Ranger to import the updated CA certificate:
+
+   ```bash
+   kubectl -n ranger rollout restart deployment ranger-apache-ranger
+   kubectl -n ranger rollout status deployment ranger-apache-ranger --timeout=120s
+   ```
+
+6. Confirm the new cert is trusted inside the Ranger pod:
+
+   ```bash
+   kubectl -n ranger exec deploy/ranger-apache-ranger -- bash -c \
+     '/opt/java/openjdk/bin/keytool -list -v \
+        -keystore /opt/java/openjdk/jre/lib/security/cacerts \
+        -storepass changeit -alias trino-ca' \
+     | grep -E "Owner|Subject Alternative"
+   # Expected: Owner: O=Trino, CN=trino.local
+   ```
+
+> **Note:** If you use cert-manager or another CA, replace steps 1-2 with your
+> certificate workflow — the important part is that the ingress serves a cert whose SAN
+> includes `trino.local`, and that same CA cert is in Ranger's `customCaCerts` secret.
+
+### Fixes in 0.4.0
+
+#### `PKIX path building failed` when connecting Ranger to Trino (or other TLS services)
+**Cause:** Trino's TLS certificate is signed by a CA that is not in the JVM's default
+truststore.
+
+**Fix:** enable `customCaCerts` with a Secret containing the CA certificate — see
+[Custom CA certificates](#custom-ca-certificates-tls-trust) above.
+
+### Fixes in 0.3.0
+
+#### Pod-level DNS / hostname resolution
+**Fix:** added `hostAliases` support for injecting custom `/etc/hosts` entries into the
+Ranger pod.
+
+### Fixes in 0.2.0
+
+These fix three stacked failures seen on a fresh install (notably on slow,
 NFS-backed storage):
 
 ### 1. `password authentication failed for user "postgres"` / *User postgres has no password assigned*

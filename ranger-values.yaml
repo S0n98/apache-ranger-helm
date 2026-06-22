@@ -1,5 +1,10 @@
 replicaCount: 1
 
+hostAliases:
+  - ip: "192.168.2.100"
+    hostnames:
+      - "trino.local"
+
 image:
   repository: apache/ranger
   tag: "2.8.0"
@@ -7,6 +12,10 @@ image:
 
 ranger:
   adminPassword: "StrongPass58"
+
+customCaCerts:
+  enabled: true
+  secretName: "trino-ca-cert"
 
 service:
   type: ClusterIP # or LoadBalancer, NodePort
