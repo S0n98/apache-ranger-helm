@@ -4,7 +4,7 @@ A Helm chart that deploys [Apache Ranger](https://ranger.apache.org/) Admin (v2.
 with a bundled [Bitnami PostgreSQL](https://github.com/bitnami/charts/tree/main/bitnami/postgresql)
 database as its policy store.
 
-- **Chart version:** `0.5.0`
+- **Chart version:** `0.6.0`
 - **App version (Ranger):** `2.8.0`
 - **Database:** PostgreSQL 14 (bundled subchart, `postgresql` v13.2.27)
 
@@ -15,7 +15,7 @@ database as its policy store.
 ```
 .
 ├── apache-ranger/                 # Chart source
-│   ├── Chart.yaml                 # version 0.5.0 / appVersion 2.8.0
+│   ├── Chart.yaml                 # version 0.6.0 / appVersion 2.8.0
 │   ├── values.yaml                # default values (ingress disabled by default)
 │   ├── charts/postgresql/         # bundled Bitnami PostgreSQL subchart
 │   └── templates/
@@ -24,6 +24,7 @@ database as its policy store.
 │       ├── service.yaml           # ClusterIP service on :6080
 │       ├── ingress.yaml           # optional Ingress
 │       └── NOTES.txt              # post-install access instructions
+├── apache-ranger-0.5.0.tgz        # previous packaged chart (customCaCerts keytool fix)
 ├── apache-ranger-0.4.0.tgz        # previous packaged chart (customCaCerts)
 ├── apache-ranger-0.3.0.tgz        # previous packaged chart (hostAliases)
 ├── apache-ranger-0.2.0.tgz        # previous packaged chart
@@ -217,6 +218,34 @@ ingress:
           pathType: Prefix
 ```
 
+### Health probes
+
+Ranger Admin takes several minutes to start (DB schema setup, service initialization).
+The chart includes a **startupProbe** that gates liveness and readiness checks until
+Ranger is fully serving, preventing premature restarts during the init window.
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `startupProbe.enabled` | bool | `true` | Enable startup probe (gates liveness/readiness) |
+| `startupProbe.httpGet.path` | string | `/login.jsp` | HTTP path to probe |
+| `startupProbe.httpGet.port` | int | `6080` | Port to probe |
+| `startupProbe.initialDelaySeconds` | int | `60` | Seconds before first probe |
+| `startupProbe.periodSeconds` | int | `10` | Seconds between probes |
+| `startupProbe.timeoutSeconds` | int | `5` | Seconds before a probe times out |
+| `startupProbe.failureThreshold` | int | `30` | Failures before giving up (~6 min budget) |
+| `livenessProbe.enabled` | bool | `true` | Enable liveness probe (restarts unresponsive pods) |
+| `livenessProbe.httpGet.path` | string | `/login.jsp` | HTTP path to probe |
+| `livenessProbe.httpGet.port` | int | `6080` | Port to probe |
+| `livenessProbe.periodSeconds` | int | `30` | Seconds between probes |
+| `livenessProbe.timeoutSeconds` | int | `5` | Seconds before a probe times out |
+| `livenessProbe.failureThreshold` | int | `3` | Failures before restarting |
+| `readinessProbe.enabled` | bool | `true` | Enable readiness probe (removes from Service endpoints) |
+| `readinessProbe.httpGet.path` | string | `/login.jsp` | HTTP path to probe |
+| `readinessProbe.httpGet.port` | int | `6080` | Port to probe |
+| `readinessProbe.periodSeconds` | int | `10` | Seconds between probes |
+| `readinessProbe.timeoutSeconds` | int | `5` | Seconds before a probe times out |
+| `readinessProbe.failureThreshold` | int | `3` | Failures before marking unready |
+
 ### Resources
 
 | Key | Type | Default | Description |
@@ -300,6 +329,20 @@ deployment. The reasons are documented inline in `templates/deployment.yaml`:
 ---
 
 ## Troubleshooting / fixes
+
+### Fixes in 0.6.0
+
+#### Ranger Admin health probes (startup / liveness / readiness)
+**Problem:** The Ranger Admin container had no health checks. Kubernetes could not
+detect whether the service was up, route traffic before it was ready, or restart it
+if it became unresponsive.
+
+**Fix:** Added three HTTP probes against `/login.jsp:6080`:
+- **startupProbe** — gates liveness/readiness for up to ~6 minutes (`initialDelaySeconds: 60`, `failureThreshold: 30`, `periodSeconds: 10`), giving Ranger time to run `setup.sh` and start the admin service without being killed prematurely.
+- **livenessProbe** — restarts the pod if Ranger stops responding (checked every 30s, 3 failures).
+- **readinessProbe** — removes the pod from Service endpoints while it is not yet serving (checked every 10s, 3 failures).
+
+All probes are enabled by default and fully configurable via `values.yaml`.
 
 ### Fixes in 0.5.0
 

@@ -19,6 +19,34 @@ service:
   port: 6080
   externalIPs: []
 
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /login.jsp
+    port: 6080
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30  # 60s + 30*10s = 360s ≈ 6 min budget for first-time startup
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /login.jsp
+    port: 6080
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /login.jsp
+    port: 6080
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
 resources:
   limits:
     cpu: 500m
